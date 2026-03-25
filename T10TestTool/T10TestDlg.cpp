@@ -136,6 +136,23 @@ LRESULT CT10TestDlg::OnUpdateLog(WPARAM /*wParam*/, LPARAM lParam)
         m_editLog.GetWindowText(cur);
         if (!cur.IsEmpty()) cur += "\r\n";
         cur += *pMsg;
+
+        // Trim to last 500 lines to prevent memory overflow
+        const int MAX_LINES = 500;
+        int lineCount = cur.Replace("\n", "\n") + 1;
+        if (lineCount > MAX_LINES)
+        {
+            int pos = 0;
+            int linesToSkip = lineCount - MAX_LINES;
+            for (int i = 0; i < linesToSkip; i++)
+            {
+                int nextPos = cur.Find('\n', pos);
+                if (nextPos < 0) break;
+                pos = nextPos + 1;
+            }
+            cur = cur.Right(cur.GetLength() - pos);
+        }
+
         m_editLog.SetWindowText(cur);
         int len = m_editLog.GetWindowTextLength();
         m_editLog.SetSel(len, len);
