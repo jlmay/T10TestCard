@@ -33,6 +33,12 @@
 #define IDC_RADIO_SERIAL                5002
 #define IDC_EDIT_COM_PORT               5003
 #define IDC_CHK_RESEARCH_ON_ERR         5004
+#define IDC_STATIC_GRP_TEST_MODE         5005
+#define IDC_RADIO_TEST_RANDOM           5006
+#define IDC_RADIO_TEST_READWRITE        5007
+#define IDC_LBL_INTERVAL                5008
+#define IDC_EDIT_INTERVAL               5009
+#define IDC_LBL_INTERVAL_UNIT           5010
 
 // Next default values for new objects
 //
@@ -40,7 +46,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        102
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         5005
+#define _APS_NEXT_CONTROL_VALUE         5011
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

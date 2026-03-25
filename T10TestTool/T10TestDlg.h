@@ -55,6 +55,11 @@ protected:
     CButton     m_radioSerial;
     CButton     m_chkReSearchOnErr;
     CEdit       m_editComPort;
+    CButton     m_radioTestRandom;
+    CButton     m_radioTestReadWrite;
+    CEdit       m_editInterval;
+    int         m_nInterval;     // loop interval in 100ms units (0-600)
+    int         m_nTestMode;      // 0=random number test, 1=read/write test
 
 // ---- Helpers ----
     void AddLog(const CString& msg);
@@ -62,6 +67,8 @@ protected:
     void UpdateCmdCount(LONG count);
     void UpdateErrCount(LONG count);
     void UpdateButtonStates();
+    void ReSearchAndReinit(CString& snHex, unsigned char* snBuf,
+        unsigned int& snLen, unsigned char* atsBuf, unsigned char& atsLen);
 
 // ---- Static thread proc ----
     static UINT CardTestThreadProc(LPVOID pParam);

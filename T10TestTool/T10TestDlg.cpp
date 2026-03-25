@@ -55,6 +55,9 @@ void CT10TestDlg::DoDataExchange(CDataExchange* pDX)
     DDX_Control(pDX, IDC_RADIO_SERIAL,       m_radioSerial);
     DDX_Control(pDX, IDC_CHK_RESEARCH_ON_ERR, m_chkReSearchOnErr);
     DDX_Control(pDX, IDC_EDIT_COM_PORT,      m_editComPort);
+    DDX_Control(pDX, IDC_RADIO_TEST_RANDOM,   m_radioTestRandom);
+    DDX_Control(pDX, IDC_RADIO_TEST_READWRITE, m_radioTestReadWrite);
+    DDX_Control(pDX, IDC_EDIT_INTERVAL,       m_editInterval);
 }
 
 BOOL CT10TestDlg::OnInitDialog()
@@ -69,8 +72,14 @@ BOOL CT10TestDlg::OnInitDialog()
     m_editComPort.SetWindowText("1");
     m_editComPort.EnableWindow(FALSE);
 
-    // Check "Re-search on error" by default
-    m_chkReSearchOnErr.SetCheck(BST_CHECKED);
+    // Test mode defaults
+    m_radioTestRandom.SetCheck(BST_CHECKED);
+    m_radioTestReadWrite.SetCheck(BST_UNCHECKED);
+    m_editInterval.SetWindowText("1");
+    m_nInterval = 1;
+
+    // Re-search on error default: OFF
+    m_chkReSearchOnErr.SetCheck(BST_UNCHECKED);
 
     m_staticCardStatus.SetWindowText("---");
     m_staticFwVer.SetWindowText("---");
@@ -293,8 +302,20 @@ void CT10TestDlg::OnBnClickedBtnCpuTest()
     if (!m_bConnected || m_pWorkerThread != nullptr)
         return;
 
-    // Read checkbox state at this moment
+    // Read UI state at this moment
     BOOL bReSearch = (m_chkReSearchOnErr.GetCheck() == BST_CHECKED);
+
+    // Read interval (100ms units, clamped 0-600)
+    CString strInterval;
+    m_editInterval.GetWindowText(strInterval);
+    int nInterval = _ttoi(strInterval);
+    if (nInterval < 0) nInterval = 0;
+    if (nInterval > 600) nInterval = 600;
+    m_nInterval = nInterval;
+
+    // Read test mode (0=random, 1=read/write)
+    int nMode = (m_radioTestReadWrite.GetCheck() == BST_CHECKED) ? 1 : 0;
+    m_nTestMode = nMode;
 
     InterlockedExchange(&m_nCmdCount, 0);
     InterlockedExchange(&m_nErrorCount, 0);
@@ -310,9 +331,18 @@ void CT10TestDlg::OnBnClickedBtnCpuTest()
     }
 
     m_btnCpuTest.EnableWindow(FALSE);
-    AddLog(bReSearch
-        ? "=== CPU Card Test started (Re-search on error: ON) ==="
-        : "=== CPU Card Test started (Re-search on error: OFF) ===");
+
+    CString modeStr = (nMode == 0) ? "Random Number (0084000008)" : "Read/Write (00D6/00B0)";
+    CString intervalStr;
+    intervalStr.Format("Interval: %d*100ms = %dms", nInterval, nInterval * 100);
+    CString reStr = bReSearch ? "ON" : "OFF";
+
+    AddLog("========================================");
+    AddLog("=== CPU Card Test started ===");
+    AddLog("Mode: " + modeStr);
+    AddLog(intervalStr);
+    AddLog("Re-search on error: " + reStr);
+    AddLog("========================================");
 }
 
 // ============================================================
@@ -352,14 +382,21 @@ UINT CT10TestDlg::CardTestThreadProc(LPVOID pParam)
 //
 // Flow:
 //   1. ONCE at start  -> dc_reset + dc_config_card + dc_pro_resetInt
-//   2. LOOP            -> dc_pro_commandlinkInt(0084000008) continuously
+//   2. LOOP            -> based on m_nTestMode:
+//                        - Mode 0: dc_pro_commandlinkInt(0084000008) continuously
+//                        - Mode 1: write 255 random bytes (00D68700FF) then read back (00B08700FF)
 //   3. On error        -> if "Re-search on error" checked: re-init card and retry
 //                        else: break (stop loop)
-//   4. On no card      -> wait and keep polling until card appears
+//   4. Interval after each loop iteration: m_nInterval * 100 ms
 // ============================================================
 void CT10TestDlg::DoCardTestLoop()
 {
-    BOOL bReSearchOnErr = (m_chkReSearchOnErr.GetCheck() == BST_CHECKED);
+    BOOL  bReSearchOnErr = (m_chkReSearchOnErr.GetCheck() == BST_CHECKED);
+    int   nInterval = m_nInterval;       // copy from UI (in 100ms units)
+    int   nTestMode  = m_nTestMode;      // 0=random, 1=read/write
+
+    // Initialize random seed for read/write test
+    srand((unsigned int)GetTickCount());
 
     // ---- Phase 1: One-time initialization ----
     AddLog("Step 1/3: Resetting RF field...");
@@ -375,7 +412,6 @@ void CT10TestDlg::DoCardTestLoop()
     {
         SetCardStatus("No card");
         AddLog("No card found. Waiting for card to be placed...");
-        // Wait for card to appear
         while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
         {
             if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
@@ -405,7 +441,7 @@ void CT10TestDlg::DoCardTestLoop()
         CString err;
         err.Format("CPU card reset FAILED (ret=%d). Test aborted.", ret);
         AddLog(err);
-        return;  // Cannot proceed without successful reset
+        return;
     }
 
     CString atsHex;
@@ -416,107 +452,209 @@ void CT10TestDlg::DoCardTestLoop()
         atsHex += b;
     }
     AddLog("CPU card reset SUCCESS  ATS: " + atsHex);
-    AddLog("=== Starting stability test: 0084000008 loop ===");
 
-    // ---- Phase 2: Continuous APDU loop ----
-    // APDU: 00 84 00 00 08  (GET CHALLENGE, 8 bytes)
-    unsigned char cmd[5] = {0x00, 0x84, 0x00, 0x00, 0x08};
+    if (nTestMode == 0)
+        AddLog("=== Starting RANDOM NUMBER test loop ===");
+    else
+        AddLog("=== Starting READ/WRITE test loop ===");
+
+    // ---- Phase 2: Continuous test loop ----
     unsigned char rspBuf[512] = {0};
     unsigned int  rspLen = 0;
 
+    // Random number test APDU: 00 84 00 00 08
+    unsigned char cmdRandom[5] = {0x00, 0x84, 0x00, 0x00, 0x08};
+
+    // Read/write test APDU buffers
+    unsigned char writeData[255];   // 255 bytes random data
+    unsigned char readData[255];     // 255 bytes read back
+    unsigned char cmdWrite[260];    // 00 D6 00 00 FF + 255 bytes
+    unsigned char cmdRead[5] = {0x00, 0xB0, 0x00, 0x00, 0xFF};
+
+    // Prepare write command header
+    cmdWrite[0] = 0x00;
+    cmdWrite[1] = 0xD6;
+    cmdWrite[2] = 0x00;
+    cmdWrite[3] = 0x00;
+    cmdWrite[4] = 0xFF;  // Le = 255 bytes
+
     while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
     {
-        rspLen = 0;
-        memset(rspBuf, 0, sizeof(rspBuf));
-        ret = dc_pro_commandlinkInt(m_hDevice, 5, cmd, &rspLen, rspBuf, 7);
-
-        if (ret != 0)
+        // ================== Mode 0: Random Number Test ==================
+        if (nTestMode == 0)
         {
-            // APDU command failed
-            LONG errCnt = InterlockedIncrement(&m_nErrorCount);
-            UpdateErrCount(errCnt);
+            rspLen = 0;
+            memset(rspBuf, 0, sizeof(rspBuf));
+            ret = dc_pro_commandlinkInt(m_hDevice, 5, cmdRandom, &rspLen, rspBuf, 7);
 
-            CString errMsg;
-            errMsg.Format("APDU ERROR (ret=%d)  Error count: %ld", ret, errCnt);
-            AddLog(errMsg);
-
-            if (!bReSearchOnErr)
+            if (ret != 0)
             {
-                // Stop on error
-                AddLog("Test STOPPED (Re-search on error: OFF).");
-                break;
+                LONG errCnt = InterlockedIncrement(&m_nErrorCount);
+                UpdateErrCount(errCnt);
+                CString errMsg;
+                errMsg.Format("APDU ERROR (ret=%d)  Error count: %ld", ret, errCnt);
+                AddLog(errMsg);
+
+                if (!bReSearchOnErr)
+                {
+                    AddLog("Test STOPPED (Re-search on error: OFF).");
+                    break;
+                }
+                ReSearchAndReinit(snHex, snBuf, snLen, atsBuf, atsLen);
+                continue;
             }
 
-            // Re-search card and re-initialize
-            AddLog("Re-searching card (Re-search on error: ON)...");
+            // APDU success
+            LONG cnt = InterlockedIncrement(&m_nCmdCount);
+            UpdateCmdCount(cnt);
+            Sleep(nInterval * 100);  // delay after each command
+        }
+        // ================== Mode 1: Read/Write Test ==================
+        else
+        {
+            // Step A: Generate 255 random bytes and write
+            for (int i = 0; i < 255; i++)
+                writeData[i] = (unsigned char)(rand() & 0xFF);
 
-            dc_reset(m_hDevice, 10);
-            dc_config_card(m_hDevice, 'A');
+            memcpy(cmdWrite + 5, writeData, 255);
 
-            int retry = 0;
-            while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
+            rspLen = 0;
+            memset(rspBuf, 0, sizeof(rspBuf));
+            ret = dc_pro_commandlinkInt(m_hDevice, 260, cmdWrite, &rspLen, rspBuf, 7);
+
+            if (ret != 0)
             {
-                if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
-                    break;
-                SetCardStatus("Re-searching...");
-                Sleep(300);
-                retry++;
-                if (retry > 50)
+                LONG errCnt = InterlockedIncrement(&m_nErrorCount);
+                UpdateErrCount(errCnt);
+                CString errMsg;
+                errMsg.Format("WRITE ERROR (ret=%d)  Error count: %ld", ret, errCnt);
+                AddLog(errMsg);
+
+                if (!bReSearchOnErr)
                 {
-                    // Timeout: no card for 15 seconds
-                    AddLog("Re-search timeout. No card found. Stopping.");
-                    return;
+                    AddLog("Test STOPPED (Re-search on error: OFF).");
+                    break;
+                }
+                ReSearchAndReinit(snHex, snBuf, snLen, atsBuf, atsLen);
+                continue;
+            }
+
+            // Step B: Read back 255 bytes
+            rspLen = 0;
+            memset(readData, 0, sizeof(readData));
+            ret = dc_pro_commandlinkInt(m_hDevice, 5, cmdRead, &rspLen, readData, 7);
+
+            if (ret != 0)
+            {
+                LONG errCnt = InterlockedIncrement(&m_nErrorCount);
+                UpdateErrCount(errCnt);
+                CString errMsg;
+                errMsg.Format("READ ERROR (ret=%d)  Error count: %ld", ret, errCnt);
+                AddLog(errMsg);
+
+                if (!bReSearchOnErr)
+                {
+                    AddLog("Test STOPPED (Re-search on error: OFF).");
+                    break;
+                }
+                ReSearchAndReinit(snHex, snBuf, snLen, atsBuf, atsLen);
+                continue;
+            }
+
+            // Step C: Compare
+            BOOL bMatch = TRUE;
+            int nMismatchIdx = -1;
+            for (int i = 0; i < 255; i++)
+            {
+                if (readData[i] != writeData[i])
+                {
+                    bMatch = FALSE;
+                    nMismatchIdx = i;
+                    break;
                 }
             }
 
-            // Re-initialize card
-            snHex.Empty();
-            for (unsigned int i = 0; i < snLen && i < 64; i++)
+            if (!bMatch)
             {
-                CString b;
-                b.Format("%02X", snBuf[i]);
-                snHex += b;
-            }
-            SetCardStatus("Card OK  UID: " + snHex);
-            AddLog("Card found again, UID: " + snHex);
+                LONG errCnt = InterlockedIncrement(&m_nErrorCount);
+                UpdateErrCount(errCnt);
+                CString errMsg;
+                errMsg.Format("COMPARE FAILED (offset %d: wrote 0x%02X, read 0x%02X)  Error count: %ld",
+                    nMismatchIdx, writeData[nMismatchIdx], readData[nMismatchIdx], errCnt);
+                AddLog(errMsg);
 
-            ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
-            if (ret != 0)
-            {
-                AddLog("CPU card re-reset FAILED. Stopping.");
-                return;
+                if (!bReSearchOnErr)
+                {
+                    AddLog("Test STOPPED (Re-search on error: OFF).");
+                    break;
+                }
+                ReSearchAndReinit(snHex, snBuf, snLen, atsBuf, atsLen);
+                continue;
             }
-            atsHex.Empty();
-            for (unsigned char i = 0; i < atsLen; i++)
-            {
-                CString b;
-                b.Format("%02X", atsBuf[i]);
-                atsHex += b;
-            }
-            AddLog("CPU card re-reset SUCCESS  ATS: " + atsHex);
-            continue;  // Continue APDU loop
+
+            // Success
+            LONG cnt = InterlockedIncrement(&m_nCmdCount);
+            UpdateCmdCount(cnt);
+            Sleep(nInterval * 100);  // delay after each complete write+read cycle
         }
-
-        // APDU success
-        LONG cnt = InterlockedIncrement(&m_nCmdCount);
-        UpdateCmdCount(cnt);
-
-        CString rspHex;
-        for (unsigned int i = 0; i < rspLen; i++)
-        {
-            CString b;
-            b.Format("%02X", rspBuf[i]);
-            rspHex += b;
-        }
-
-        CString logMsg;
-        logMsg.Format("[%ld] APDU OK  0084000008 -> %s", cnt, (LPCTSTR)rspHex);
-        AddLog(logMsg);
-
-        Sleep(200);
     }
 
     AddLog("Card test loop exited.");
+}
+
+// ============================================================
+// Helper: Re-search card and re-initialize
+// ============================================================
+void CT10TestDlg::ReSearchAndReinit(CString& snHex, unsigned char* snBuf,
+    unsigned int& snLen, unsigned char* atsBuf, unsigned char& atsLen)
+{
+    AddLog("Re-searching card (Re-search on error: ON)...");
+
+    dc_reset(m_hDevice, 10);
+    dc_config_card(m_hDevice, 'A');
+
+    int retry = 0;
+    while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
+    {
+        if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
+            break;
+        SetCardStatus("Re-searching...");
+        Sleep(300);
+        retry++;
+        if (retry > 100)
+        {
+            AddLog("Re-search timeout (30s). No card found. Stopping.");
+            InterlockedExchange(&m_nThreadCmd, CMD_STOP);
+            return;
+        }
+    }
+
+    snHex.Empty();
+    for (unsigned int i = 0; i < snLen && i < 64; i++)
+    {
+        CString b;
+        b.Format("%02X", snBuf[i]);
+        snHex += b;
+    }
+    SetCardStatus("Card OK  UID: " + snHex);
+    AddLog("Card found again, UID: " + snHex);
+
+    short ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
+    if (ret != 0)
+    {
+        AddLog("CPU card re-reset FAILED. Stopping.");
+        InterlockedExchange(&m_nThreadCmd, CMD_STOP);
+        return;
+    }
+
+    CString atsHex;
+    for (unsigned char i = 0; i < atsLen; i++)
+    {
+        CString b;
+        b.Format("%02X", atsBuf[i]);
+        atsHex += b;
+    }
+    AddLog("CPU card re-reset SUCCESS  ATS: " + atsHex);
 }
 
 // ============================================================
