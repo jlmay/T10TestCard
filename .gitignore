@@ -1,0 +1,45 @@
+# VS metadata
+.vs/
+
+# Build output
+Debug/
+Release/
+x64/
+Win32/
+
+# VS intermediate files
+*.aps
+*.tlog
+*.log
+*.lastbuildstate
+*.idb
+*.pdb
+*.ilk
+*.obj
+*.pch
+*.ipch
+*.res
+*.rsrc
+
+# VS user settings (personal)
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# IntelliSense
+*.opensdf
+*.sdf
+*.cachefile
+*.exp
+
+# ReSharper
+*_ReSharper.*
+.resharper/
+
+# NuGet
+packages/
+*.nupkg
+
+# dcrf32 DLL (运行时文件，可按需保留)
+# dcrf32-10.3.4.2-Windows_x86/bin/dcrf32.dll  # 取消注释以排除
