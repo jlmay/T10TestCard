@@ -426,55 +426,6 @@ void CT10TestDlg::DoCardTestLoop()
 
     while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
     {
-        // IMPORTANT: Check if card is still present before each APDU.
-        // This prevents the "phantom success" bug where dc_pro_commandlinkInt
-        // returns OK due to serial port buffering after card is removed.
-        ret = dc_card_n(m_hDevice, 0x00, &snLen, snBuf);
-        if (ret != 0)
-        {
-            // Card removed or not detected
-            SetCardStatus("Card removed - waiting...");
-            AddLog("Warning: Card not detected, re-searching...");
-
-            dc_reset(m_hDevice, 10);
-            dc_config_card(m_hDevice, 'A');
-
-            int retry = 0;
-            while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
-            {
-                if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
-                    break;
-                Sleep(300);
-                retry++;
-                if (retry > 100)
-                {
-                    // Timeout: no card for 30 seconds
-                    AddLog("Re-search timeout (30s). No card found. Stopping.");
-                    return;
-                }
-            }
-
-            // Card found again, re-init
-            CString snHex2;
-            for (unsigned int i = 0; i < snLen && i < 64; i++)
-            {
-                CString b;
-                b.Format("%02X", snBuf[i]);
-                snHex2 += b;
-            }
-            SetCardStatus("Card OK  UID: " + snHex2);
-
-            ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
-            if (ret != 0)
-            {
-                AddLog("CPU card re-reset FAILED. Stopping.");
-                return;
-            }
-            AddLog("Card re-init OK, continuing test.");
-            continue;
-        }
-
-        // Card is present, send APDU
         rspLen = 0;
         memset(rspBuf, 0, sizeof(rspBuf));
         ret = dc_pro_commandlinkInt(m_hDevice, 5, cmd, &rspLen, rspBuf, 7);
@@ -510,10 +461,10 @@ void CT10TestDlg::DoCardTestLoop()
                 SetCardStatus("Re-searching...");
                 Sleep(300);
                 retry++;
-                if (retry > 100)
+                if (retry > 50)
                 {
-                    // Timeout: no card for 30 seconds
-                    AddLog("Re-search timeout (30s). No card found. Stopping.");
+                    // Timeout: no card for 15 seconds
+                    AddLog("Re-search timeout. No card found. Stopping.");
                     return;
                 }
             }
@@ -535,13 +486,32 @@ void CT10TestDlg::DoCardTestLoop()
                 AddLog("CPU card re-reset FAILED. Stopping.");
                 return;
             }
-            AddLog("CPU card re-reset SUCCESS.");
+            atsHex.Empty();
+            for (unsigned char i = 0; i < atsLen; i++)
+            {
+                CString b;
+                b.Format("%02X", atsBuf[i]);
+                atsHex += b;
+            }
+            AddLog("CPU card re-reset SUCCESS  ATS: " + atsHex);
             continue;  // Continue APDU loop
         }
 
-        // APDU success: update count only (no per-call log to avoid UI freeze)
+        // APDU success
         LONG cnt = InterlockedIncrement(&m_nCmdCount);
         UpdateCmdCount(cnt);
+
+        CString rspHex;
+        for (unsigned int i = 0; i < rspLen; i++)
+        {
+            CString b;
+            b.Format("%02X", rspBuf[i]);
+            rspHex += b;
+        }
+
+        CString logMsg;
+        logMsg.Format("[%ld] APDU OK  0084000008 -> %s", cnt, (LPCTSTR)rspHex);
+        AddLog(logMsg);
 
         Sleep(200);
     }
