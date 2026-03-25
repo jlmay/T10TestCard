@@ -1,5 +1,6 @@
 # VS metadata
 .vs/
+.vscode/
 
 # Build output
 Debug/
@@ -43,3 +44,16 @@ packages/
 
 # dcrf32 DLL (运行时文件，可按需保留)
 # dcrf32-10.3.4.2-Windows_x86/bin/dcrf32.dll  # 取消注释以排除
+
+# WorkBuddy config
+.workbuddy/
+
+# Archives
+*.7z
+*.zip
+*.rar
+
+# Documentation and tools
+T10_TestTool_使用说明.md
+基于dcrf32读卡器的MFC工具编程需求文档模板.md
+T10稳定性测试工具/
