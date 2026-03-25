@@ -469,12 +469,12 @@ void CT10TestDlg::DoCardTestLoop()
     unsigned char writeData[255];   // 255 bytes random data
     unsigned char readData[255];     // 255 bytes read back
     unsigned char cmdWrite[260];    // 00 D6 00 00 FF + 255 bytes
-    unsigned char cmdRead[5] = {0x00, 0xB0, 0x00, 0x00, 0xFF};
+    unsigned char cmdRead[5] = {0x00, 0xB0, 0x87, 0x00, 0xFF};
 
     // Prepare write command header
     cmdWrite[0] = 0x00;
     cmdWrite[1] = 0xD6;
-    cmdWrite[2] = 0x00;
+    cmdWrite[2] = 0x87;
     cmdWrite[3] = 0x00;
     cmdWrite[4] = 0xFF;  // Le = 255 bytes
 
@@ -507,6 +507,18 @@ void CT10TestDlg::DoCardTestLoop()
             // APDU success
             LONG cnt = InterlockedIncrement(&m_nCmdCount);
             UpdateCmdCount(cnt);
+
+            CString rspHex;
+            for (unsigned int i = 0; i < rspLen; i++)
+            {
+                CString b;
+                b.Format("%02X", rspBuf[i]);
+                rspHex += b;
+            }
+            CString logMsg;
+            logMsg.Format("[%ld] 0084000008 OK  -> %s", cnt, (LPCTSTR)rspHex);
+            AddLog(logMsg);
+
             Sleep(nInterval * 100);  // delay after each command
         }
         // ================== Mode 1: Read/Write Test ==================
@@ -595,6 +607,11 @@ void CT10TestDlg::DoCardTestLoop()
             // Success
             LONG cnt = InterlockedIncrement(&m_nCmdCount);
             UpdateCmdCount(cnt);
+
+            CString logMsg;
+            logMsg.Format("[%ld] WRITE OK  (00D6+255B)  READ OK  (00B0)  COMPARE OK", cnt);
+            AddLog(logMsg);
+
             Sleep(nInterval * 100);  // delay after each complete write+read cycle
         }
     }
