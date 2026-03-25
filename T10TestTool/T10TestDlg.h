@@ -70,6 +70,10 @@ protected:
     void ReSearchAndReinit(CString& snHex, unsigned char* snBuf,
         unsigned int& snLen, unsigned char* atsBuf, unsigned char& atsLen);
 
+    // Returns TRUE if communication error (-1), stops loop and returns FALSE.
+    // Use for all dcrf32 function calls to detect reader communication failures.
+    BOOL CheckCommError(short ret, const CString& context);
+
 // ---- Static thread proc ----
     static UINT CardTestThreadProc(LPVOID pParam);
     void DoCardTestLoop();

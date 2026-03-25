@@ -404,7 +404,8 @@ UINT CT10TestDlg::CardTestThreadProc(LPVOID pParam)
 //                        - Mode 1: write 255 random bytes (00D68700FF) then read back (00B08700FF)
 //   3. On error        -> if "Re-search on error" checked: re-init card and retry
 //                        else: break (stop loop)
-//   4. Interval after each loop iteration: m_nInterval * 100 ms
+//   4. Any dcrf32 function returning -1 -> "读卡器通讯错误", stop loop unconditionally
+//   5. Interval after each loop iteration: m_nInterval * 100 ms
 // ============================================================
 void CT10TestDlg::DoCardTestLoop()
 {
@@ -417,25 +418,36 @@ void CT10TestDlg::DoCardTestLoop()
 
     // ---- Phase 1: One-time initialization ----
     AddLog("Step 1/3: Resetting RF field...");
-    dc_reset(m_hDevice, 10);
-    dc_config_card(m_hDevice, 'A');
+    short ret = dc_reset(m_hDevice, 10);
+    if (CheckCommError(ret, "dc_reset")) { AddLog("Test STOPPED."); return; }
+
+    ret = dc_config_card(m_hDevice, 'A');
+    if (CheckCommError(ret, "dc_config_card")) { AddLog("Test STOPPED."); return; }
 
     AddLog("Step 2/3: Searching for card...");
     unsigned int  snLen = 0;
     unsigned char snBuf[64] = {0};
-    short ret = dc_card_n(m_hDevice, 0x00, &snLen, snBuf);
+    ret = dc_card_n(m_hDevice, 0x00, &snLen, snBuf);
 
-    if (ret != 0)
+    if (ret > 0)
     {
+        // >0 means no card (not a communication error)
         SetCardStatus("No card");
         AddLog("No card found. Waiting for card to be placed...");
         while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
         {
-            if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
-                break;
+            ret = dc_card_n(m_hDevice, 0x00, &snLen, snBuf);
+            if (CheckCommError(ret, "dc_card_n")) { AddLog("Test STOPPED."); return; }
+            if (ret == 0)
+                break;  // card found
             SetCardStatus("No card - waiting...");
             Sleep(300);
         }
+    }
+    else if (ret < 0)
+    {
+        // -1: communication error, already handled by CheckCommError
+        AddLog("Test STOPPED."); return;
     }
 
     // Build and show UID
@@ -453,7 +465,8 @@ void CT10TestDlg::DoCardTestLoop()
     unsigned char atsLen = 0;
     unsigned char atsBuf[256] = {0};
     ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
-    if (ret != 0)
+    if (CheckCommError(ret, "dc_pro_resetInt")) { AddLog("Test STOPPED."); return; }
+    if (ret > 0)
     {
         CString err;
         err.Format("CPU card reset FAILED (ret=%d). Test aborted.", ret);
@@ -483,9 +496,9 @@ void CT10TestDlg::DoCardTestLoop()
     unsigned char cmdRandom[5] = {0x00, 0x84, 0x00, 0x00, 0x08};
 
     // Read/write test APDU buffers
-    unsigned char writeData[255];   // 255 bytes random data
-    unsigned char readData[255];     // 255 bytes read back
-    unsigned char cmdWrite[260];    // 00 D6 00 00 FF + 255 bytes
+    unsigned char writeData[255];
+    unsigned char readData[255];
+    unsigned char cmdWrite[260];    // 00 D6 87 00 FF + 255 bytes
     unsigned char cmdRead[5] = {0x00, 0xB0, 0x87, 0x00, 0xFF};
 
     // Prepare write command header
@@ -504,8 +517,16 @@ void CT10TestDlg::DoCardTestLoop()
             memset(rspBuf, 0, sizeof(rspBuf));
             ret = dc_pro_commandlinkInt(m_hDevice, 5, cmdRandom, &rspLen, rspBuf, 7);
 
+            if (ret == -1)
+            {
+                // Communication error: stop unconditionally
+                CheckCommError(ret, "0084000008");
+                AddLog("Test STOPPED.");
+                break;
+            }
             if (ret != 0)
             {
+                // Card error (not -1): Re-search logic applies
                 LONG errCnt = InterlockedIncrement(&m_nErrorCount);
                 UpdateErrCount(errCnt);
                 CString errMsg;
@@ -536,7 +557,7 @@ void CT10TestDlg::DoCardTestLoop()
             logMsg.Format("[%ld] 0084000008 OK  -> %s", cnt, (LPCTSTR)rspHex);
             AddLog(logMsg);
 
-            Sleep(nInterval * 100);  // delay after each command
+            Sleep(nInterval * 100);
         }
         // ================== Mode 1: Read/Write Test ==================
         else
@@ -551,6 +572,12 @@ void CT10TestDlg::DoCardTestLoop()
             memset(rspBuf, 0, sizeof(rspBuf));
             ret = dc_pro_commandlinkInt(m_hDevice, 260, cmdWrite, &rspLen, rspBuf, 7);
 
+            if (ret == -1)
+            {
+                CheckCommError(ret, "00D6(write)");
+                AddLog("Test STOPPED.");
+                break;
+            }
             if (ret != 0)
             {
                 LONG errCnt = InterlockedIncrement(&m_nErrorCount);
@@ -573,6 +600,12 @@ void CT10TestDlg::DoCardTestLoop()
             memset(readData, 0, sizeof(readData));
             ret = dc_pro_commandlinkInt(m_hDevice, 5, cmdRead, &rspLen, readData, 7);
 
+            if (ret == -1)
+            {
+                CheckCommError(ret, "00B0(read)");
+                AddLog("Test STOPPED.");
+                break;
+            }
             if (ret != 0)
             {
                 LONG errCnt = InterlockedIncrement(&m_nErrorCount);
@@ -629,7 +662,7 @@ void CT10TestDlg::DoCardTestLoop()
             logMsg.Format("[%ld] WRITE OK  (00D6+255B)  READ OK  (00B0)  COMPARE OK", cnt);
             AddLog(logMsg);
 
-            Sleep(nInterval * 100);  // delay after each complete write+read cycle
+            Sleep(nInterval * 100);
         }
     }
 
@@ -637,21 +670,44 @@ void CT10TestDlg::DoCardTestLoop()
 }
 
 // ============================================================
-// Helper: Re-search card and re-initialize
+// Helper: Check for reader communication error (-1).
+// Returns TRUE if communication error, stops the loop and returns FALSE.
+// Use after every dcrf32 call.
+// ============================================================
+BOOL CT10TestDlg::CheckCommError(short ret, const CString& context)
+{
+    if (ret == -1)
+    {
+        CString msg;
+        msg.Format("读卡器通讯错误 [%s]  Test STOPPED.", (LPCTSTR)context);
+        AddLog(msg);
+        InterlockedExchange(&m_nThreadCmd, CMD_STOP);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// ============================================================
+// Helper: Re-search card and re-initialize (called only when Re-search is ON)
 // ============================================================
 void CT10TestDlg::ReSearchAndReinit(CString& snHex, unsigned char* snBuf,
     unsigned int& snLen, unsigned char* atsBuf, unsigned char& atsLen)
 {
     AddLog("Re-searching card (Re-search on error: ON)...");
 
-    dc_reset(m_hDevice, 10);
-    dc_config_card(m_hDevice, 'A');
+    short ret = dc_reset(m_hDevice, 10);
+    if (CheckCommError(ret, "dc_reset")) return;
+
+    ret = dc_config_card(m_hDevice, 'A');
+    if (CheckCommError(ret, "dc_config_card")) return;
 
     int retry = 0;
     while (InterlockedCompareExchange(&m_nThreadCmd, CMD_POLLING, CMD_POLLING) == CMD_POLLING)
     {
-        if (dc_card_n(m_hDevice, 0x00, &snLen, snBuf) == 0)
-            break;
+        ret = dc_card_n(m_hDevice, 0x00, &snLen, snBuf);
+        if (CheckCommError(ret, "dc_card_n")) return;
+        if (ret == 0)
+            break;  // card found
         SetCardStatus("Re-searching...");
         Sleep(300);
         retry++;
@@ -673,13 +729,8 @@ void CT10TestDlg::ReSearchAndReinit(CString& snHex, unsigned char* snBuf,
     SetCardStatus("Card OK  UID: " + snHex);
     AddLog("Card found again, UID: " + snHex);
 
-    short ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
-    if (ret != 0)
-    {
-        AddLog("CPU card re-reset FAILED. Stopping.");
-        InterlockedExchange(&m_nThreadCmd, CMD_STOP);
-        return;
-    }
+    ret = dc_pro_resetInt(m_hDevice, &atsLen, atsBuf);
+    if (CheckCommError(ret, "dc_pro_resetInt")) return;
 
     CString atsHex;
     for (unsigned char i = 0; i < atsLen; i++)
